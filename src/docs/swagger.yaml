@@ -1,0 +1,707 @@
+openapi: 3.0.3
+info:
+  title: Citas API – BarberTime
+  description: |
+    Microservicio de gestión de **citas** para BarberTime.
+
+    Maneja el ciclo de vida completo de una cita:
+    `pendiente → confirmada → completada` o `pendiente|confirmada → cancelada`.
+
+    ## Autenticación
+    Todos los endpoints requieren JWT emitido por el servicio de Usuarios:
+    ```
+    Authorization: Bearer <token>
+    ```
+
+    ## Roles y permisos
+    | Acción | Cliente | Barbero | Admin |
+    |---|---|---|---|
+    | Listar / Ver citas | ✅ (solo las suyas) | ✅ (todas) | ✅ |
+    | Crear cita | ✅ | ✅ | ✅ |
+    | Actualizar cita (pendiente) | ✅ | ✅ | ✅ |
+    | Confirmar cita | ❌ | ✅ | ✅ |
+    | Cancelar cita | ✅ (la suya) | ✅ | ✅ |
+    | Completar cita | ❌ | ✅ | ✅ |
+    | Eliminar cita (hard delete) | ❌ | ❌ | ✅ |
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:4003
+    description: Servidor local
+
+tags:
+  - name: Salud
+    description: Health check del microservicio
+  - name: Citas
+    description: Gestión y ciclo de vida de citas
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+
+    # ── Cita (respuesta completa) ──
+    Cita:
+      type: object
+      properties:
+        _id:
+          type: string
+          example: "664f1a2b3c4d5e6f7a8b9c0f"
+        clienteId:
+          type: string
+          description: ID del cliente (referencia al módulo de Usuarios)
+          example: "664f1a2b3c4d5e6f7a8b9c01"
+        barberoId:
+          type: string
+          description: ID del barbero (referencia al módulo de Usuarios)
+          example: "664f1a2b3c4d5e6f7a8b9c02"
+        servicioId:
+          type: string
+          description: ID del servicio (referencia al módulo de Servicios)
+          example: "664f1a2b3c4d5e6f7a8b9c03"
+        nombreServicio:
+          type: string
+          description: Snapshot del nombre del servicio al momento de agendar
+          example: "Corte clásico"
+        precioServicio:
+          type: number
+          description: Snapshot del precio al momento de agendar
+          example: 25000
+        duracionMinutos:
+          type: integer
+          example: 30
+        fechaHora:
+          type: string
+          format: date-time
+          example: "2024-06-10T14:00:00.000Z"
+        estado:
+          type: string
+          enum: [pendiente, confirmada, cancelada, completada]
+          example: "pendiente"
+        motivoCancelacion:
+          type: string
+          example: "El cliente no puede asistir"
+        notas:
+          type: string
+          example: "Corte con navaja en los lados"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    # ── Input para crear cita ──
+    CitaInput:
+      type: object
+      required: [clienteId, barberoId, servicioId, nombreServicio, precioServicio, duracionMinutos, fechaHora]
+      properties:
+        clienteId:
+          type: string
+          example: "664f1a2b3c4d5e6f7a8b9c01"
+        barberoId:
+          type: string
+          example: "664f1a2b3c4d5e6f7a8b9c02"
+        servicioId:
+          type: string
+          example: "664f1a2b3c4d5e6f7a8b9c03"
+        nombreServicio:
+          type: string
+          example: "Corte clásico"
+        precioServicio:
+          type: number
+          minimum: 0
+          example: 25000
+        duracionMinutos:
+          type: integer
+          minimum: 1
+          example: 30
+        fechaHora:
+          type: string
+          format: date-time
+          example: "2024-06-10T14:00:00.000Z"
+        notas:
+          type: string
+          example: "Corte con navaja en los lados"
+
+    # ── Input para actualizar cita ──
+    CitaUpdateInput:
+      type: object
+      description: Solo se puede actualizar una cita en estado 'pendiente'. No se puede cambiar el estado con este endpoint.
+      properties:
+        barberoId:
+          type: string
+          example: "664f1a2b3c4d5e6f7a8b9c02"
+        servicioId:
+          type: string
+          example: "664f1a2b3c4d5e6f7a8b9c03"
+        nombreServicio:
+          type: string
+          example: "Arreglo de barba"
+        precioServicio:
+          type: number
+          minimum: 0
+          example: 15000
+        duracionMinutos:
+          type: integer
+          minimum: 1
+          example: 20
+        fechaHora:
+          type: string
+          format: date-time
+          example: "2024-06-10T15:00:00.000Z"
+        notas:
+          type: string
+          example: "Cambio de horario"
+
+    # ── Paginación ──
+    Paginacion:
+      type: object
+      properties:
+        total:
+          type: integer
+          example: 38
+        page:
+          type: integer
+          example: 1
+        limit:
+          type: integer
+          example: 10
+        totalPaginas:
+          type: integer
+          example: 4
+
+    # ── Errores ──
+    Error:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: false
+        mensaje:
+          type: string
+          example: "Mensaje de error"
+        error:
+          type: string
+          example: "Detalle técnico"
+
+    Unauthorized:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: false
+        mensaje:
+          type: string
+          example: "Token no proporcionado"
+
+    Forbidden:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: false
+        mensaje:
+          type: string
+          example: "Acceso restringido a administradores"
+
+    Conflict:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: false
+        mensaje:
+          type: string
+          example: "El barbero ya tiene una cita en ese horario"
+        citaExistente:
+          type: object
+          properties:
+            id:
+              type: string
+              example: "664f1a2b3c4d5e6f7a8b9c0f"
+            fechaHora:
+              type: string
+              format: date-time
+            duracionMinutos:
+              type: integer
+              example: 30
+
+paths:
+
+  # ════════ HEALTH CHECK ════════
+  /api/salud:
+    get:
+      summary: Health check
+      description: Verifica que el microservicio de citas esté operativo.
+      tags: [Salud]
+      responses:
+        '200':
+          description: Servicio activo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  servicio:
+                    type: string
+                    example: "modulo-citas"
+                  estado:
+                    type: string
+                    example: "activo"
+
+  # ════════ CITAS ════════
+  /api/citas:
+    get:
+      summary: Listar citas
+      description: |
+        Devuelve citas con filtros y paginación. Requiere **JWT válido**.
+        - Admin y barbero ven todas las citas.
+        - El cliente debe filtrar por su propio `clienteId`.
+      tags: [Citas]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: clienteId
+          in: query
+          description: Filtrar por ID de cliente
+          schema:
+            type: string
+          example: "664f1a2b3c4d5e6f7a8b9c01"
+        - name: barberoId
+          in: query
+          description: Filtrar por ID de barbero
+          schema:
+            type: string
+          example: "664f1a2b3c4d5e6f7a8b9c02"
+        - name: estado
+          in: query
+          description: Filtrar por estado de la cita
+          schema:
+            type: string
+            enum: [pendiente, confirmada, cancelada, completada]
+        - name: desde
+          in: query
+          description: Fecha ISO de inicio del rango (fechaHora >= desde)
+          schema:
+            type: string
+            format: date-time
+          example: "2024-06-01T00:00:00.000Z"
+        - name: hasta
+          in: query
+          description: Fecha ISO de fin del rango (fechaHora <= hasta)
+          schema:
+            type: string
+            format: date-time
+          example: "2024-06-30T23:59:59.000Z"
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+      responses:
+        '200':
+          description: Lista de citas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Cita'
+                  paginacion:
+                    $ref: '#/components/schemas/Paginacion'
+        '401':
+          description: No autenticado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Unauthorized'
+        '500':
+          description: Error interno
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    post:
+      summary: Crear (agendar) una cita
+      description: |
+        Agenda una nueva cita. Requiere **JWT válido**.  
+        Valida que el barbero no tenga una cita activa que se traslape con el horario solicitado.
+        La cita se crea en estado `pendiente`.
+      tags: [Citas]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CitaInput'
+      responses:
+        '201':
+          description: Cita creada correctamente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/Cita'
+        '400':
+          description: Datos inválidos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No autenticado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Unauthorized'
+        '409':
+          description: Conflicto de horario — el barbero ya tiene una cita en ese rango
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conflict'
+
+  /api/citas/{id}:
+    get:
+      summary: Obtener cita por ID
+      description: Devuelve una cita específica. Requiere **JWT válido**.
+      tags: [Citas]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID de la cita (MongoDB ObjectId)
+          schema:
+            type: string
+          example: "664f1a2b3c4d5e6f7a8b9c0f"
+      responses:
+        '200':
+          description: Datos de la cita
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/Cita'
+        '400':
+          description: ID inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No autenticado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Unauthorized'
+        '404':
+          description: Cita no encontrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    put:
+      summary: Actualizar cita
+      description: |
+        Actualiza los datos de una cita. Requiere **JWT válido**.  
+        **Solo funciona si la cita está en estado `pendiente`.**  
+        No permite cambiar el estado (usa los endpoints PATCH para eso).
+      tags: [Citas]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "664f1a2b3c4d5e6f7a8b9c0f"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CitaUpdateInput'
+      responses:
+        '200':
+          description: Cita actualizada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/Cita'
+        '400':
+          description: Datos inválidos o la cita no está en estado 'pendiente'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No autenticado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Unauthorized'
+        '404':
+          description: Cita no encontrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      summary: Eliminar cita (hard delete)
+      description: |
+        Elimina permanentemente una cita. Requiere **JWT válido** y rol **admin**.
+      tags: [Citas]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "664f1a2b3c4d5e6f7a8b9c0f"
+      responses:
+        '200':
+          description: Cita eliminada correctamente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  mensaje:
+                    type: string
+                    example: "Cita eliminada correctamente"
+        '400':
+          description: ID inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No autenticado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Unauthorized'
+        '403':
+          description: Solo los administradores pueden eliminar citas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Forbidden'
+        '404':
+          description: Cita no encontrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ════════ ACCIONES DE ESTADO ════════
+  /api/citas/{id}/confirmar:
+    patch:
+      summary: Confirmar cita
+      description: |
+        Cambia el estado de `pendiente` → `confirmada`. Requiere **JWT válido**.  
+        Solo barberos y admins pueden confirmar citas.
+      tags: [Citas]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "664f1a2b3c4d5e6f7a8b9c0f"
+      responses:
+        '200':
+          description: Cita confirmada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  mensaje:
+                    type: string
+                    example: "Cita confirmada"
+                  data:
+                    $ref: '#/components/schemas/Cita'
+        '400':
+          description: La cita no está en estado 'pendiente'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No autenticado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Unauthorized'
+        '404':
+          description: Cita no encontrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/citas/{id}/cancelar:
+    patch:
+      summary: Cancelar cita
+      description: |
+        Cambia el estado de `pendiente` o `confirmada` → `cancelada`. Requiere **JWT válido**.  
+        El cliente solo puede cancelar sus propias citas; barberos y admins pueden cancelar cualquiera.
+      tags: [Citas]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "664f1a2b3c4d5e6f7a8b9c0f"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                motivoCancelacion:
+                  type: string
+                  example: "El cliente no puede asistir"
+      responses:
+        '200':
+          description: Cita cancelada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  mensaje:
+                    type: string
+                    example: "Cita cancelada"
+                  data:
+                    $ref: '#/components/schemas/Cita'
+        '400':
+          description: La cita no se puede cancelar en su estado actual
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No autenticado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Unauthorized'
+        '404':
+          description: Cita no encontrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/citas/{id}/completar:
+    patch:
+      summary: Completar cita
+      description: |
+        Cambia el estado de `confirmada` → `completada`. Requiere **JWT válido**.  
+        Solo barberos y admins pueden marcar una cita como completada.
+      tags: [Citas]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "664f1a2b3c4d5e6f7a8b9c0f"
+      responses:
+        '200':
+          description: Cita marcada como completada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  mensaje:
+                    type: string
+                    example: "Cita marcada como completada"
+                  data:
+                    $ref: '#/components/schemas/Cita'
+        '400':
+          description: La cita no está en estado 'confirmada'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No autenticado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Unauthorized'
+        '404':
+          description: Cita no encontrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'

@@ -21,5 +21,7 @@ services:
         value: https://servicios-main.onrender.com
       - key: USUARIOS_URL
         value: https://usuarios-75yj.onrender.com
+      - key: ADMIN_URL
+        value: https://modulo-admin-257o.onrender.com
       - key: ALLOWED_ORIGINS
         sync: false

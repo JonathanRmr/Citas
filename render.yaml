@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: barbertime-citas
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: MONGO_URI
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_EXPIRY
+        value: 7d
+      - key: SERVICIOS_URL
+        value: https://servicios-main.onrender.com
+      - key: USUARIOS_URL
+        value: https://usuarios-75yj.onrender.com
+      - key: ALLOWED_ORIGINS
+        sync: false

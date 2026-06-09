@@ -1,9 +1,127 @@
 const Cita = require('../models/cita.model');
 
 /**
- * Controlador de Citas.
- * Todas las respuestas usan el formato consistente: { ok, data | mensaje, ... }
+ * Verifica si un horario solicitado se traslapa con alguna cita activa del barbero.
+ *
+ * Dos citas se traslapan cuando:
+ *   inicio_A < fin_B  Y  fin_A > inicio_B
+ *
+ * Se usa aritmética en JS (no $expr en MongoDB) para evitar el bug de la
+ * versión anterior que podía no evaluar correctamente el fin calculado.
+ *
+ * @param {string} barberoId
+ * @param {Date}   fechaInicio  - inicio de la cita a crear/actualizar
+ * @param {number} duracion     - duración en minutos
+ * @param {string} [excluirId]  - ID de la cita actual (para no compararse consigo misma en updates)
+ * @returns {object|null} la cita conflictiva o null si no hay traslape
  */
+async function buscarTraslape(barberoId, fechaInicio, duracion, excluirId = null) {
+  const fechaFin = new Date(fechaInicio.getTime() + duracion * 60000);
+
+  // Traemos solo las citas activas del barbero en una ventana amplia
+  // (±24h alrededor del inicio pedido) para no escanear toda la colección.
+  const ventanaDesde = new Date(fechaInicio.getTime() - 24 * 60 * 60000);
+  const ventanaHasta = new Date(fechaInicio.getTime() + 24 * 60 * 60000);
+
+  const query = {
+    barberoId,
+    estado: { $in: ['pendiente', 'confirmada'] },
+    fechaHora: { $gte: ventanaDesde, $lte: ventanaHasta },
+  };
+  if (excluirId) query._id = { $ne: excluirId };
+
+  const citasActivas = await Cita.find(query).lean();
+
+  for (const cita of citasActivas) {
+    const inicioExistente = new Date(cita.fechaHora);
+    const finExistente   = new Date(inicioExistente.getTime() + cita.duracionMinutos * 60000);
+
+    // Condición de traslape: los rangos [A, B) y [C, D) se solapan si A < D && B > C
+    const seSolapa = fechaInicio < finExistente && fechaFin > inicioExistente;
+    if (seSolapa) return cita;
+  }
+
+  return null;
+}
+
+/**
+ * Verifica que la fechaHora solicitada caiga dentro del horario activo
+ * del barbero para ese día de la semana, y que no caiga en un descanso.
+ *
+ * El módulo de horarios vive en el módulo admin. Lo consultamos vía HTTP
+ * usando ADMIN_URL (variable de entorno). Si la variable no está definida
+ * o la consulta falla, se omite la validación (fail-open) para no bloquear
+ * el sistema si el módulo admin está dormido en Render.
+ *
+ * @param {string} barberoId
+ * @param {Date}   fechaInicio
+ * @param {number} duracion  - en minutos (para verificar que la cita entera cabe)
+ * @returns {{ valido: boolean, mensaje?: string }}
+ */
+async function verificarHorarioBarbero(barberoId, fechaInicio, duracion) {
+  const adminUrl = process.env.ADMIN_URL;
+  if (!adminUrl) return { valido: true }; // sin configurar → omitir validación
+
+  try {
+    const diaSemana = fechaInicio.getDay(); // 0=Dom … 6=Sáb
+    const url = `${adminUrl}/api/admin/horarios/barberos?barberoId=${barberoId}`;
+
+    const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return { valido: true }; // error al consultar → omitir
+
+    const json = await resp.json();
+    const horarios = json.data || [];
+
+    // Buscar el horario para ese día de la semana
+    const horarioDia = horarios.find(
+      (h) => h.diaSemana === diaSemana && h.activo !== false
+    );
+
+    if (!horarioDia) {
+      return {
+        valido: false,
+        mensaje: `El barbero no trabaja ese día (${['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'][diaSemana]})`,
+      };
+    }
+
+    // Convertir horaInicio/horaFin ("HH:mm") a minutos desde medianoche
+    const toMin = (hhmm) => {
+      const [h, m] = hhmm.split(':').map(Number);
+      return h * 60 + m;
+    };
+
+    const citaInicioMin = fechaInicio.getHours() * 60 + fechaInicio.getMinutes();
+    const citaFinMin    = citaInicioMin + duracion;
+    const turnoInicioMin = toMin(horarioDia.horaInicio);
+    const turnoFinMin    = toMin(horarioDia.horaFin);
+
+    if (citaInicioMin < turnoInicioMin || citaFinMin > turnoFinMin) {
+      return {
+        valido: false,
+        mensaje: `La cita está fuera del horario del barbero (${horarioDia.horaInicio} – ${horarioDia.horaFin})`,
+      };
+    }
+
+    // Verificar que la cita no caiga en un descanso
+    for (const descanso of (horarioDia.descansos || [])) {
+      const descansoInicioMin = toMin(descanso.inicio);
+      const descansoFinMin    = toMin(descanso.fin);
+
+      // Traslape entre cita y descanso
+      if (citaInicioMin < descansoFinMin && citaFinMin > descansoInicioMin) {
+        return {
+          valido: false,
+          mensaje: `La cita coincide con el descanso del barbero (${descanso.inicio} – ${descanso.fin})`,
+        };
+      }
+    }
+
+    return { valido: true };
+  } catch {
+    // Timeout u otro error de red → omitir validación (fail-open)
+    return { valido: true };
+  }
+}
 
 // ─────────────────────────────────────────────
 // CREATE — Agendar una nueva cita
@@ -21,32 +139,39 @@ const crearCita = async (req, res) => {
       notas,
     } = req.body;
 
-    // Verificar que no exista traslape de horario para el mismo barbero
+    if (!clienteId || !barberoId || !servicioId || !fechaHora || !duracionMinutos) {
+      return res.status(400).json({
+        ok: false,
+        mensaje: 'clienteId, barberoId, servicioId, fechaHora y duracionMinutos son obligatorios',
+      });
+    }
+
     const fechaInicio = new Date(fechaHora);
-    const fechaFin = new Date(fechaInicio.getTime() + duracionMinutos * 60000);
+    if (isNaN(fechaInicio.getTime())) {
+      return res.status(400).json({ ok: false, mensaje: 'fechaHora no es una fecha válida' });
+    }
 
-    const traslape = await Cita.findOne({
-      barberoId,
-      estado: { $in: ['pendiente', 'confirmada'] },
-      $or: [
-        // Nueva cita empieza dentro de una existente
-        { fechaHora: { $lt: fechaFin }, $expr: {
-          $gt: [
-            { $add: ['$fechaHora', { $multiply: ['$duracionMinutos', 60000] }] },
-            fechaInicio,
-          ],
-        }},
-      ],
-    });
+    // 1. Verificar que la cita esté dentro del horario del barbero
+    const horario = await verificarHorarioBarbero(barberoId, fechaInicio, duracionMinutos);
+    if (!horario.valido) {
+      return res.status(400).json({ ok: false, mensaje: horario.mensaje });
+    }
 
+    // 2. Verificar traslape con otras citas del mismo barbero
+    const traslape = await buscarTraslape(barberoId, fechaInicio, duracionMinutos);
     if (traslape) {
+      const finTraslape = new Date(
+        new Date(traslape.fechaHora).getTime() + traslape.duracionMinutos * 60000
+      );
       return res.status(409).json({
         ok: false,
         mensaje: 'El barbero ya tiene una cita en ese horario',
         citaExistente: {
-          id: traslape._id,
-          fechaHora: traslape.fechaHora,
+          id:              traslape._id,
+          fechaHora:       traslape.fechaHora,
           duracionMinutos: traslape.duracionMinutos,
+          finEstimado:     finTraslape,
+          nombreServicio:  traslape.nombreServicio,
         },
       });
     }
@@ -79,16 +204,16 @@ const obtenerCitas = async (req, res) => {
       clienteId,
       barberoId,
       estado,
-      desde,    // fecha ISO de inicio del rango
-      hasta,    // fecha ISO de fin del rango
-      page = 1,
+      desde,
+      hasta,
+      page  = 1,
       limit = 10,
     } = req.query;
 
     const filtro = {};
     if (clienteId) filtro.clienteId = clienteId;
     if (barberoId) filtro.barberoId = barberoId;
-    if (estado)    filtro.estado = estado;
+    if (estado)    filtro.estado    = estado;
 
     if (desde || hasta) {
       filtro.fechaHora = {};
@@ -108,8 +233,8 @@ const obtenerCitas = async (req, res) => {
       data: citas,
       paginacion: {
         total,
-        page: Number(page),
-        limit: Number(limit),
+        page:        Number(page),
+        limit:       Number(limit),
         totalPaginas: Math.ceil(total / Number(limit)),
       },
     });
@@ -153,7 +278,6 @@ const actualizarCita = async (req, res) => {
       });
     }
 
-    // Campos permitidos para actualización general (no el estado)
     const camposPermitidos = [
       'barberoId', 'servicioId', 'nombreServicio',
       'precioServicio', 'duracionMinutos', 'fechaHora', 'notas',
@@ -162,6 +286,36 @@ const actualizarCita = async (req, res) => {
     camposPermitidos.forEach((campo) => {
       if (req.body[campo] !== undefined) actualizacion[campo] = req.body[campo];
     });
+
+    // Si se cambia fecha/hora o duración, re-validar horario y traslapes
+    const nuevaFecha    = actualizacion.fechaHora    ? new Date(actualizacion.fechaHora)    : cita.fechaHora;
+    const nuevaDuracion = actualizacion.duracionMinutos ?? cita.duracionMinutos;
+    const nuevoBarbero  = actualizacion.barberoId   ?? cita.barberoId;
+
+    if (actualizacion.fechaHora || actualizacion.duracionMinutos || actualizacion.barberoId) {
+      const horario = await verificarHorarioBarbero(nuevoBarbero, nuevaFecha, nuevaDuracion);
+      if (!horario.valido) {
+        return res.status(400).json({ ok: false, mensaje: horario.mensaje });
+      }
+
+      const traslape = await buscarTraslape(nuevoBarbero, nuevaFecha, nuevaDuracion, req.params.id);
+      if (traslape) {
+        const finTraslape = new Date(
+          new Date(traslape.fechaHora).getTime() + traslape.duracionMinutos * 60000
+        );
+        return res.status(409).json({
+          ok: false,
+          mensaje: 'El barbero ya tiene una cita en ese horario',
+          citaExistente: {
+            id:              traslape._id,
+            fechaHora:       traslape.fechaHora,
+            duracionMinutos: traslape.duracionMinutos,
+            finEstimado:     finTraslape,
+            nombreServicio:  traslape.nombreServicio,
+          },
+        });
+      }
+    }
 
     const citaActualizada = await Cita.findByIdAndUpdate(
       req.params.id,
